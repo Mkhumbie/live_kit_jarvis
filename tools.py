@@ -21,6 +21,7 @@ import os
 import logging
 import requests
 from dotenv import load_dotenv
+import json
 
 # Prefer MSAL when available; fall back to direct token request if not installed
 try:
@@ -122,19 +123,58 @@ class OutlookClient:
 
     def send_message(self, subject: str, body: str, to_recipients: List[str]) -> Dict[str, Any]:
         """Send a message from the mailbox. `to_recipients` is a list of email addresses."""
-        url = f"{self.base_url}/sendMail"
+        # Create the message first so we can capture its ID and metadata,
+        # then send it. This allows returning a webLink / internetMessageId
+        # for better confirmation to the user.
+        create_url = f"{self.base_url}/messages"
         payload = {
-            "message": {
-                "subject": subject,
-                "body": {"contentType": "Text", "content": body},
-                "toRecipients": [{"emailAddress": {"address": r}} for r in to_recipients],
-            },
-            "saveToSentItems": "true",
+            "subject": subject,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": [{"emailAddress": {"address": r}} for r in to_recipients],
         }
-        r = self._session.post(url, json=payload)
+        # Create message (draft)
+        r = self._session.post(create_url, json=payload)
+        # Log response for debugging (status and truncated body)
+        try:
+            logger.debug("Outlook create response status=%s body=%s", r.status_code, (r.text or '')[:1000])
+        except Exception:
+            pass
         r.raise_for_status()
-        # sendMail returns 202 No Content on success; return status
-        return {"status_code": r.status_code}
+        msg = r.json()
+        msg_id = msg.get("id")
+
+        if not msg_id:
+            return {"status_code": r.status_code, "error": "failed_to_create_message"}
+
+        # Send the created message
+        send_url = f"{self.base_url}/messages/{msg_id}/send"
+        r2 = self._session.post(send_url)
+        # Log send response for debugging
+        try:
+            logger.debug("Outlook send response status=%s text=%s", r2.status_code, (r2.text or '')[:1000])
+        except Exception:
+            pass
+        # send returns 202 on success
+        # After sending, fetch the message by id to return useful metadata
+        try:
+            get_url = f"{self.base_url}/messages/{msg_id}"
+            r3 = self._session.get(get_url)
+            try:
+                logger.debug("Outlook get message status=%s body=%s", r3.status_code, (r3.text or '')[:1000])
+            except Exception:
+                pass
+            r3.raise_for_status()
+            sent_msg = r3.json()
+        except Exception as e:
+            logger.exception("Failed to fetch sent message metadata: %s", e)
+            sent_msg = {}
+
+        return {
+            "status_code": r2.status_code,
+            "message_id": msg_id,
+            "webLink": sent_msg.get("webLink"),
+            "internetMessageId": sent_msg.get("internetMessageId"),
+        }
 
     def mark_as_read(self, message_id: str) -> Dict[str, Any]:
         url = f"{self.base_url}/messages/{message_id}"
@@ -175,6 +215,7 @@ import smtplib
 from email.mime.multipart import MIMEMultipart  
 from email.mime.text import MIMEText
 from typing import Optional
+import asyncio
 
 @function_tool()
 async def get_weather(
@@ -228,9 +269,13 @@ async def read_emails(
 ) -> str:
     """List recent emails from the configured mailbox.
 
-    Returns a short JSON-like string with id, subject, from and isRead flag.
-    Logs all operations and confirms task completion.
+    Returns a human-readable numbered list of emails with subject, sender, and read status.
+    
+    IMPORTANT: The assistant MUST present exactly what this tool returns.
+    Do not make up or hallucinate email content - use only what this tool returns.
     """
+    print("==== [TOOL ENTRY] read_emails function called ====")
+    logging.info("==== [TOOL ENTRY] read_emails function called with limit=%d ====", limit)
     logging.info("[TASK START] read_emails: Retrieving up to %d emails", limit)
     try:
         # Initialize Outlook client - this will handle token refresh
@@ -241,23 +286,174 @@ async def read_emails(
         return f"Error initializing Outlook client: {e}"
 
     try:
-        # Retrieve messages from mailbox
-        msgs = client.list_messages(limit=limit)
+        # Retrieve messages from mailbox using $select for predictable fields including body
+        url = f"{client.base_url}/mailFolders/Inbox/messages?$select=id,subject,from,isRead,receivedDateTime,body&$top={limit}"
+        r = client._session.get(url)
+        try:
+            logging.debug("read_emails: raw response status=%s body=%s", r.status_code, (r.text or '')[:2000])
+        except Exception:
+            pass
+        r.raise_for_status()
+        data = r.json()
+        msgs = data.get("value", [])
+
         out_lines = []
         for m in msgs:
+            # Extract body content
+            body_data = m.get("body") or {}
+            content = body_data.get("content", "")
+            # Clean up HTML content if present
+            if body_data.get("contentType") == "html":
+                import re
+                # Basic HTML stripping
+                content = re.sub(r'<[^>]+>', '', content)
+                content = re.sub(r'\s+', ' ', content).strip()
+            
             out_lines.append({
                 "id": m.get("id"),
                 "subject": m.get("subject"),
                 "from": (m.get("from") or {}).get("emailAddress", {}).get("address"),
                 "isRead": m.get("isRead"),
+                "receivedDateTime": m.get("receivedDateTime"),
+                "content": content[:200] + "..." if len(content) > 200 else content,  # Truncate long content
             })
+
         logging.info("[TASK COMPLETE] read_emails: Successfully retrieved %d messages from mailbox", len(out_lines))
-        # Return formatted result with confirmation
-        result = f"Email retrieval complete. Retrieved {len(out_lines)} messages:\n{str(out_lines)}"
-        return result
+        
+        # Build a human-readable summary for the assistant to speak/present
+        if len(out_lines) == 0:
+            summary = "TOOL_OUTPUT_START: No emails found in your inbox. TOOL_OUTPUT_END"
+        else:
+            summary_lines = [f"TOOL_OUTPUT_START: Retrieved {len(out_lines)} email(s) from your actual mailbox:"]
+            for idx, msg in enumerate(out_lines, 1):
+                subj = msg.get('subject', '(no subject)')
+                sender = msg.get('from', '(unknown)')
+                read_status = "read" if msg.get('isRead') else "unread"
+                content = msg.get('content', '')
+                
+                if content:
+                    summary_lines.append(f"{idx}. {subj} — from {sender} ({read_status})")
+                    summary_lines.append(f"   Content: {content}")
+                else:
+                    summary_lines.append(f"{idx}. {subj} — from {sender} ({read_status}) [No content preview]")
+                summary_lines.append("")  # Add blank line between emails
+            if len(out_lines) > 10:
+                summary_lines.append(f"... and {len(out_lines)-10} more.")
+            summary_lines.append("TOOL_OUTPUT_END")
+            summary = "\n".join(summary_lines)
+        
+        # Force a small delay to ensure complete execution
+        import asyncio
+        await asyncio.sleep(0.1)
+        
+        # Return ONLY the plain text summary so the assistant presents it directly
+        # Do not wrap in JSON since the LLM isn't parsing it correctly
+        logging.info("read_emails: RETURNING TO AGENT: %s", summary)
+        print(f"==== [TOOL RETURN] read_emails tool returning: {summary} ====")
+        print(f"==== [TOOL EXIT] read_emails function exiting successfully ====")
+        
+        # AGGRESSIVE DEBUGGING: Make sure tool result is visible
+        logging.critical("===== TOOL RESULT CRITICAL LOG =====")
+        logging.critical("read_emails returning: %s", summary)
+        logging.critical("===== END TOOL RESULT =====")
+        
+        # WORKAROUND: Write to a file so we can verify the tool executed  
+        try:
+            from datetime import datetime
+            with open("debug_tool_result.txt", "w", encoding="utf-8") as f:
+                f.write(f"TOOL EXECUTED AT: {datetime.now()}\n")
+                f.write(f"RESULT: {summary}\n")
+        except Exception as e:
+            logging.debug("Could not write debug file: %s", e)
+        
+        # Ensure the result is a proper string
+        final_result = str(summary)
+        print(f"==== [FINAL RESULT] Type: {type(final_result)}, Content: {final_result} ====")
+        return final_result
     except Exception as e:
         logging.exception("[TASK FAILED] read_emails: Exception listing messages: %s", e)
         return f"Error listing messages: {e}"
+
+
+@function_tool()
+async def read_email_content(
+    context: RunContext,  # type: ignore
+    email_subject: str
+) -> str:
+    """Read the full content of a specific email by subject line.
+    
+    Args:
+        email_subject: The subject line or part of the subject line of the email to read
+        
+    Returns:
+        Full email content including subject, sender, and body text
+    """
+    logging.info("[TASK START] read_email_content: Looking for email with subject containing '%s'", email_subject)
+    
+    try:
+        # Initialize Outlook client
+        client = OutlookClient()
+        logging.debug("OutlookClient initialized successfully")
+    except Exception as e:
+        logging.exception("[TASK FAILED] read_email_content: Failed to create OutlookClient: %s", e)
+        return f"Error initializing Outlook client: {e}"
+
+    try:
+        # Search for emails with matching subject
+        # Use $filter to search for emails containing the subject text
+        encoded_subject = email_subject.replace("'", "''")  # Escape single quotes for OData
+        url = f"{client.base_url}/mailFolders/Inbox/messages?$filter=contains(subject,'{encoded_subject}')&$select=id,subject,from,body,receivedDateTime&$top=5"
+        
+        r = client._session.get(url)
+        r.raise_for_status()
+        data = r.json()
+        msgs = data.get("value", [])
+        
+        if not msgs:
+            return f"TOOL_OUTPUT_START: No emails found with subject containing '{email_subject}'. TOOL_OUTPUT_END"
+        
+        # Get the first matching email
+        email = msgs[0]
+        subject = email.get("subject", "(no subject)")
+        sender = (email.get("from") or {}).get("emailAddress", {}).get("address", "(unknown)")
+        received_date = email.get("receivedDateTime", "")
+        
+        # Extract full body content
+        body_data = email.get("body") or {}
+        content = body_data.get("content", "")
+        content_type = body_data.get("contentType", "")
+        
+        # Clean up HTML content if present
+        if content_type == "html":
+            import re
+            # More thorough HTML cleanup
+            content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL)
+            content = re.sub(r'<[^>]+>', '', content)
+            content = re.sub(r'&nbsp;', ' ', content)
+            content = re.sub(r'&lt;', '<', content)
+            content = re.sub(r'&gt;', '>', content)
+            content = re.sub(r'&amp;', '&', content)
+            content = re.sub(r'\s+', ' ', content).strip()
+        
+        # Format the response
+        result = f"""TOOL_OUTPUT_START: Email Content:
+
+Subject: {subject}
+From: {sender}
+Received: {received_date}
+
+Content:
+{content}
+
+TOOL_OUTPUT_END"""
+        
+        logging.info("[TASK COMPLETE] read_email_content: Successfully retrieved email content")
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] read_email_content: Exception reading email content: %s", e)
+        return f"Error reading email content: {e}"
 
 
 @function_tool()
@@ -273,31 +469,57 @@ async def send_email(
     Logs all send operations and confirms task completion.
     """
     logging.info("[TASK START] send_email: Sending email to recipients: %s with subject: %s", to_recipients, subject)
+    # Use a thread to run the blocking OutlookClient network calls so we don't block
+    # the agent's asyncio event loop. Also add a timeout to avoid hanging tasks.
     try:
-        # Initialize Outlook client - will handle token refresh
-        client = OutlookClient()
-        logging.debug("OutlookClient initialized for send operation")
-    except Exception as e:
-        logging.exception("[TASK FAILED] send_email: Failed to create OutlookClient: %s", e)
-        return f"Error initializing Outlook client: {e}"
+        # Parse comma-separated recipients
+        recipients = [r.strip() for r in to_recipients.split(",") if r.strip()]
+        if not recipients:
+            logging.warning("[TASK FAILED] send_email: No valid recipients provided")
+            return "No recipients provided."
 
-    # Parse comma-separated recipients
-    recipients = [r.strip() for r in to_recipients.split(",") if r.strip()]
-    if not recipients:
-        logging.warning("[TASK FAILED] send_email: No valid recipients provided")
-        return "No recipients provided."
+        def _send_sync(recipients_list, subj, body_text):
+            # Create OutlookClient inside the thread; MSAL will cache tokens automatically
+            client = OutlookClient()
+            logging.debug("OutlookClient initialized in thread for send")
+            return client.send_message(subject=subj, body=body_text, to_recipients=recipients_list)
 
-    try:
-        # Send the message via Graph API
-        resp = client.send_message(subject=subject, body=body, to_recipients=recipients)
-        logging.info("[TASK COMPLETE] send_email: Successfully sent email to recipients: %s (Status: %d)", 
-                     ", ".join(recipients), resp.get('status_code', 'unknown'))
-        # Return confirmation message
-        confirmation = f"Email sent successfully to {', '.join(recipients)}. Subject: {subject}"
+        logging.info("[TASK START] send_email: dispatching send in thread for %s", ", ".join(recipients))
+        try:
+            # wait up to 15 seconds for the send to complete; adjust as needed
+            resp = await asyncio.wait_for(asyncio.to_thread(_send_sync, recipients, subject, body), timeout=15.0)
+        except asyncio.TimeoutError:
+            logging.exception("[TASK FAILED] send_email: send operation timed out")
+            return "Error: send operation timed out"
+
+        status = resp.get('status_code', 'unknown')
+        logging.info("[TASK COMPLETE] send_email: Successfully sent email to recipients: %s (Status: %s)", ", ".join(recipients), status)
+
+        parts = [f"Email send attempted to {', '.join(recipients)}.", f"Subject: {subject}", f"Status: {status}"]
+        if resp.get('message_id'):
+            parts.append(f"message_id: {resp.get('message_id')}")
+        if resp.get('internetMessageId'):
+            parts.append(f"internetMessageId: {resp.get('internetMessageId')}")
+        if resp.get('webLink'):
+            parts.append(f"webLink: {resp.get('webLink')}")
+
+        confirmation = " ".join(parts)
         return confirmation
     except Exception as e:
         logging.exception("[TASK FAILED] send_email: Exception sending message to %s: %s", to_recipients, e)
         return f"Error sending message: {e}"
+
+
+@function_tool()
+async def test_simple_tool(context: RunContext) -> str:
+    """Simple test tool to verify if tool results are properly handled by the agent.
+    
+    Returns predictable output that should be easy to identify if properly used.
+    """
+    result = "SIMPLE_TOOL_OUTPUT: This is a test from test_simple_tool. The current time is 2:30 PM."
+    print(f"==== [TEST SIMPLE TOOL] Returning: {result} ====")
+    logging.info("test_simple_tool returning: %s", result)
+    return result
 
 
 # `search_and_send_email` removed per user request. Use `search_web` + `send_email` instead.

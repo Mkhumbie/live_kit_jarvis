@@ -29,13 +29,13 @@ try:
 except ImportError:
     silero = None
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
-from tools import get_weather, search_web, send_email, read_emails
+from tools import read_emails, read_email_content, test_simple_tool
 
 load_dotenv()
 
 # Configure logging for the agent with clear timestamp and level info
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -46,19 +46,19 @@ class Assistant(Agent):
     def __init__(self, memory_client=None) -> None:
         # Store memory client for later use in tool functions and session
         self.memory_client = memory_client
-        logger.info("Initializing Assistant with tools: get_weather, search_web, send_email, read_emails")
+        logger.info("Initializing Assistant with tools: read_emails, read_email_content, test_simple_tool")
         
+        # Enhanced debugging: back to basic Agent with tool result monitoring
         super().__init__(
             instructions=AGENT_INSTRUCTION,
             llm=google.beta.realtime.RealtimeModel(
-                voice="Aoede",  # Choose a voice available in the Google Realtime API
-                temperature=0.7,
+                voice="Aoede",
+                temperature=0.0,  # Completely deterministic for debugging
             ),
             tools=[
-                get_weather,
-                search_web,
-                send_email,
                 read_emails,
+                read_email_content,
+                test_simple_tool,
             ]
         )
         logger.info("Assistant initialized successfully")
@@ -469,14 +469,46 @@ async def entrypoint(ctx: agents.JobContext):
         try:
             logger.info(f"Chat context messages count: {len(chat_ctx.items)}")
             for item in chat_ctx.items:
-                content_str = ''.join(item.content) if isinstance(item.content, list) else str(item.content)
+                # Safely extract a string representation from any chat item type.
+                content_str = ""
+                try:
+                    # Try content attribute first (Message, ChatMessage)
+                    if hasattr(item, 'content'):
+                        if isinstance(item.content, list):
+                            content_str = ''.join(str(c) for c in item.content)
+                        else:
+                            content_str = str(item.content)
+                    # FunctionCall-like: use name + arguments
+                    elif hasattr(item, 'name') and hasattr(item, 'arguments'):
+                        name = getattr(item, 'name', '')
+                        args = getattr(item, 'arguments', {})
+                        content_str = f"function_call: {name}({args})"
+                    elif hasattr(item, 'tool_call_id'):
+                        # FunctionCallResult or similar
+                        content_str = f"tool_result: {getattr(item, 'tool_call_id', '')} = {getattr(item, 'result', str(item))}"
+                    elif hasattr(item, 'value'):
+                        content_str = str(getattr(item, 'value'))
+                    else:
+                        content_str = str(item)
+                except Exception as e:
+                    logger.debug(f"Failed to extract content from item {type(item)}: {e}")
+                    content_str = str(item)
 
+                # Skip if the content is the memory context string we injected at startup
                 if memory_str and memory_str in content_str:
                     continue
 
-                if item.role in ['user', 'assistant']:
+                role = getattr(item, 'role', None)
+                # Only persist user/assistant messages or best-effort text from function calls
+                if role in ['user', 'assistant']:
                     messages_formatted.append({
-                        "role": item.role,
+                        "role": role,
+                        "content": content_str.strip()
+                    })
+                elif content_str.strip():
+                    # Include function call summaries as assistant-invoked tool evidence
+                    messages_formatted.append({
+                        "role": role or 'assistant',
                         "content": content_str.strip()
                     })
 
