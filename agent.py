@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import inspect
 from dotenv import load_dotenv
@@ -29,7 +29,12 @@ try:
 except ImportError:
     silero = None
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
-from tools import read_emails, read_email_content, test_simple_tool
+from tools import (
+    read_emails, read_email_content, search_emails,
+    view_calendar, add_calendar_event, edit_calendar_event, delete_calendar_event,
+    view_contacts, add_contact, edit_contact, delete_contact,
+    test_simple_tool
+)
 
 load_dotenv()
 
@@ -46,7 +51,7 @@ class Assistant(Agent):
     def __init__(self, memory_client=None) -> None:
         # Store memory client for later use in tool functions and session
         self.memory_client = memory_client
-        logger.info("Initializing Assistant with tools: read_emails, read_email_content, test_simple_tool")
+        logger.info("Initializing Assistant with tools: read_emails, read_email_content, search_emails, view_calendar, add_calendar_event, edit_calendar_event, delete_calendar_event, view_contacts, add_contact, edit_contact, delete_contact, test_simple_tool")
         
         # Enhanced debugging: back to basic Agent with tool result monitoring
         super().__init__(
@@ -56,8 +61,24 @@ class Assistant(Agent):
                 temperature=0.0,  # Completely deterministic for debugging
             ),
             tools=[
+                # Email Tools
                 read_emails,
                 read_email_content,
+                search_emails,
+                
+                # Calendar Tools
+                view_calendar,
+                add_calendar_event,
+                edit_calendar_event,
+                delete_calendar_event,
+                
+                # Contact Tools
+                view_contacts,
+                add_contact,
+                edit_contact,
+                delete_contact,
+                
+                # Utility
                 test_simple_tool,
             ]
         )
@@ -415,6 +436,12 @@ async def entrypoint(ctx: agents.JobContext):
     # Get current date and time for agent awareness
     current_datetime = datetime.now()
     current_time_str = current_datetime.strftime("%A, %B %d, %Y at %H:%M:%S")
+    
+    # Calculate date references for relative date handling
+    current_date = current_datetime.strftime("%Y-%m-%d")
+    tomorrow_date = (current_datetime + timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_date = (current_datetime - timedelta(days=1)).strftime("%Y-%m-%d")
+    
     logger.info("Current time: %s", current_time_str)
     
     # Initialize memory client for storing and retrieving conversation history
@@ -431,7 +458,15 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Combine SESSION_INSTRUCTION with memory context and current time so agent has full history and awareness
     time_context = f"\n\n## Current Date & Time\nThe current date and time is: {current_time_str}\n"
-    instructions_with_memory = SESSION_INSTRUCTION + time_context + memory_context
+    
+    # Format session instruction with actual dates for relative date handling
+    formatted_session_instruction = SESSION_INSTRUCTION.format(
+        current_date=current_date,
+        tomorrow_date=tomorrow_date,
+        yesterday_date=yesterday_date
+    )
+    
+    instructions_with_memory = formatted_session_instruction + time_context + memory_context
     memory_str = memory_context
     
     logger.info("Creating AgentSession")
@@ -453,6 +488,15 @@ async def entrypoint(ctx: agents.JobContext):
             video_enabled=enable_video,
         ),
     )
+
+    # Pre-warm calendar cache for fast first access
+    logger.info("Pre-warming calendar cache for optimal performance")
+    try:
+        from tools import warm_calendar_cache
+        await warm_calendar_cache()
+        logger.info("Calendar cache pre-warming completed successfully")
+    except Exception as e:
+        logger.warning("Calendar cache pre-warming failed: %s", e)
 
     logger.info("Generating initial reply to user")
     await session.generate_reply(
