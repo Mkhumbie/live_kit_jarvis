@@ -448,13 +448,8 @@ async def read_emails(
     try:
         # Retrieve messages from mailbox using $select for predictable fields including body
         url = f"{client.base_url}/mailFolders/Inbox/messages?$select=id,subject,from,isRead,receivedDateTime,body&$top={limit}"
-        r = client._session.get(url)
-        try:
-            logging.debug("read_emails: raw response status=%s body=%s", r.status_code, (r.text or '')[:2000])
-        except Exception:
-            pass
-        r.raise_for_status()
-        data = r.json()
+        data = client._request("GET", url)
+        logging.debug("read_emails: Successfully retrieved messages from Graph API")
         msgs = data.get("value", [])
 
         out_lines = []
@@ -564,9 +559,7 @@ async def read_email_content(
         encoded_subject = email_subject.replace("'", "''")  # Escape single quotes for OData
         url = f"{client.base_url}/mailFolders/Inbox/messages?$filter=contains(subject,'{encoded_subject}')&$select=id,subject,from,body,receivedDateTime&$top=5"
         
-        r = client._session.get(url)
-        r.raise_for_status()
-        data = r.json()
+        data = client._request("GET", url)
         msgs = data.get("value", [])
         
         if not msgs:
@@ -967,9 +960,7 @@ async def add_calendar_event(
         
         # Create the event
         url = f"{client.base_url}/calendar/events"
-        r = client._session.post(url, json=event_data)
-        r.raise_for_status()
-        created_event = r.json()
+        created_event = client._request("POST", url, json=event_data)
         
         # Format response
         result = f"Calendar event created successfully:\n"
@@ -1087,8 +1078,7 @@ async def delete_calendar_event(
         
         # Delete the event
         url = f"{client.base_url}/calendar/events/{event_id}"
-        r = client._session.delete(url)
-        r.raise_for_status()
+        client._request("DELETE", url)
         
         result = f"Calendar event deleted successfully (ID: {event_id})"
         
@@ -1132,9 +1122,7 @@ async def view_contacts(
         else:
             url = f"{client.base_url}/contacts?$select=id,displayName,emailAddresses,businessPhones,mobilePhone&$top={limit}"
         
-        r = client._session.get(url)
-        r.raise_for_status()
-        data = r.json()
+        data = client._request("GET", url)
         contacts = data.get("value", [])
         
         if not contacts:
@@ -1230,9 +1218,7 @@ async def add_contact(
         
         # Create the contact
         url = f"{client.base_url}/contacts"
-        r = client._session.post(url, json=contact_data)
-        r.raise_for_status()
-        created_contact = r.json()
+        created_contact = client._request("POST", url, json=contact_data)
         
         # Format response
         result = f"Contact created successfully:\n"
@@ -1360,8 +1346,7 @@ async def delete_contact(
         
         # Delete the contact
         url = f"{client.base_url}/contacts/{contact_id}"
-        r = client._session.delete(url)
-        r.raise_for_status()
+        client._request("DELETE", url)
         
         result = f"Contact deleted successfully (ID: {contact_id})"
         
@@ -1411,9 +1396,7 @@ async def search_emails(
         
         url = f"{client.base_url}/mailFolders/Inbox/messages?$filter={filter_query}&$select=id,subject,from,isRead,receivedDateTime,body&$orderby=receivedDateTime desc&$top={limit}"
         
-        r = client._session.get(url)
-        r.raise_for_status()
-        data = r.json()
+        data = client._request("GET", url)
         emails = data.get("value", [])
         
         if not emails:
