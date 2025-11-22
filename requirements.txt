@@ -17,3 +17,10 @@ facenet-pytorch>=2.5.3
 opencv-python>=4.8.0
 Pillow>=10.0.0
 numpy>=1.24.0
+
+# Voice Recognition Dependencies (OPTIONAL - has compatibility issues with latest torchaudio)
+# To enable voice recognition, install compatible versions manually:
+#   pip install torch==2.0.1 torchaudio==2.0.2 speechbrain==0.5.16
+# Current issue: torchaudio 2.9+ removed list_audio_backends() that speechbrain 1.0.3 requires
+# speechbrain>=0.5.16
+# torchaudio>=2.0.0,<2.1.0

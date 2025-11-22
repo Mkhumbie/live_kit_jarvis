@@ -45,7 +45,9 @@ from tools import (
     list_known_faces, add_known_face, remove_known_face, rename_known_face,
     face_recognition_status, configure_face_recognition, test_face_capture,
     # Database manipulation tools
-    update_face_attributes, get_face_details, search_faces_by_attribute, query_database
+    update_face_attributes, get_face_details, search_faces_by_attribute, query_database,
+    # Voice and multi-modal recognition tools
+    voice_recognition_status, list_voice_profiles, multimodal_status, link_user_profiles
 )
 
 load_dotenv()
@@ -64,7 +66,9 @@ class Assistant(Agent):
         # Store memory client for later use in tool functions and session
         self.memory_client = memory_client
         self.face_engine = None  # Will be initialized when needed
-        logger.info("Initializing Assistant with tools: read_emails, read_email_content, search_emails, view_calendar, add_calendar_event, edit_calendar_event, delete_calendar_event, view_contacts, add_contact, edit_contact, delete_contact, facial recognition tools, database manipulation tools (update_face_attributes, get_face_details, search_faces_by_attribute, query_database), test_simple_tool")
+        self.voice_engine = None  # Will be initialized when needed
+        self.multimodal_engine = None  # Will be initialized when needed
+        logger.info("Initializing Assistant with tools: emails, calendar, contacts, facial recognition, voice recognition, multi-modal identification, database manipulation, test tools")
         
         # Enhanced debugging: back to basic Agent with tool result monitoring
         super().__init__(
@@ -105,6 +109,12 @@ class Assistant(Agent):
                 get_face_details,
                 search_faces_by_attribute,
                 query_database,
+                
+                # Voice and Multi-Modal Recognition Tools
+                voice_recognition_status,
+                list_voice_profiles,
+                multimodal_status,
+                link_user_profiles,
                 
                 # Utility
                 test_simple_tool,
@@ -587,13 +597,38 @@ async def entrypoint(ctx: agents.JobContext):
         logger.info("Facial recognition engine ready")
     else:
         logger.info("Facial recognition engine not available - continuing without it")
+    
+    # Initialize voice recognition engine
+    logger.info("Initializing voice recognition engine...")
+    voice_engine = None
+    try:
+        from voice_recognition import get_voice_engine, VOICE_RECOGNITION_AVAILABLE
+        if VOICE_RECOGNITION_AVAILABLE:
+            voice_engine = await get_voice_engine()
+            logger.info("Voice recognition engine ready")
+        else:
+            logger.info("Voice recognition dependencies not available")
+    except Exception as e:
+        logger.warning(f"Voice recognition engine not available: {e}")
+    
+    # Initialize multi-modal identification engine
+    logger.info("Initializing multi-modal identification engine...")
+    multimodal_engine = None
+    try:
+        from multimodal_recognition import get_multimodal_engine
+        multimodal_engine = await get_multimodal_engine(face_engine, voice_engine)
+        logger.info("Multi-modal identification engine ready")
+    except Exception as e:
+        logger.warning(f"Multi-modal identification engine not available: {e}")
 
     logger.info("Creating AgentSession")
     session = AgentSession()
     
-    # Create assistant instance with facial recognition
+    # Create assistant instance with all recognition engines
     assistant = Assistant(memory_client=memory_client)
     assistant.face_engine = face_engine
+    assistant.voice_engine = voice_engine
+    assistant.multimodal_engine = multimodal_engine
 
     logger.info("Starting agent session with noise cancellation and video settings")
     

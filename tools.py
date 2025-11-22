@@ -2406,3 +2406,240 @@ async def search_faces_by_attribute(
         logging.exception("[TASK FAILED] search_faces_by_attribute: %s", e)
         return f"❌ Error searching faces by attribute: {e}"
 
+
+# =====================================================
+# VOICE RECOGNITION TOOLS
+# =====================================================
+
+# Check for voice recognition availability
+VOICE_RECOGNITION_AVAILABLE = False
+try:
+    from voice_recognition import get_voice_engine, torch_available as voice_torch_available
+    VOICE_RECOGNITION_AVAILABLE = voice_torch_available()
+    logging.info("Voice recognition module loaded successfully")
+except ImportError as e:
+    logging.warning(f"Voice recognition not available: {e}")
+
+
+@function_tool()
+async def voice_recognition_status(
+    context: RunContext  # type: ignore
+) -> str:
+    """Get the current status of the voice recognition system.
+    
+    Returns:
+        Status information about voice recognition including available voices
+    """
+    logging.info("[TASK START] voice_recognition_status: Getting system status")
+    
+    if not VOICE_RECOGNITION_AVAILABLE:
+        return "❌ Voice recognition is not available. Install dependencies: pip install speechbrain torchaudio"
+    
+    try:
+        from voice_recognition import get_voice_engine
+        engine = await get_voice_engine()
+        
+        if not engine:
+            return "❌ Voice recognition engine failed to initialize"
+        
+        stats = engine.get_statistics()
+        
+        result = "🎙️ **Voice Recognition Status**\n\n"
+        result += f"✅ Status: ACTIVE\n"
+        result += f"👥 Registered voices: {stats['total_voices']}\n"
+        result += f"🎯 Match threshold: {stats['match_threshold']:.0%}\n"
+        result += f"📊 Total recognitions: {stats['total_recognitions']}\n\n"
+        
+        if stats['voices']:
+            result += "**Registered Voices:**\n"
+            for i, voice in enumerate(stats['voices'], 1):
+                result += f"{i}. 🗣️ {voice['name']}\n"
+                result += f"   Recognition count: {voice['recognition_count']}\n"
+                if voice['last_recognized']:
+                    result += f"   Last heard: {voice['last_recognized']}\n"
+                result += "\n"
+        else:
+            result += "💡 No voices registered yet. Add voices with add_voice_profile()\n"
+        
+        logging.info("[TASK COMPLETE] voice_recognition_status")
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] voice_recognition_status: %s", e)
+        return f"❌ Error getting voice recognition status: {e}"
+
+
+@function_tool()
+async def list_voice_profiles(
+    context: RunContext,  # type: ignore
+    search_name: Optional[str] = None
+) -> str:
+    """List all registered voice profiles.
+    
+    Args:
+        search_name: Optional name filter to search for specific voices
+        
+    Returns:
+        List of voice profiles with statistics
+    """
+    logging.info("[TASK START] list_voice_profiles")
+    
+    if not VOICE_RECOGNITION_AVAILABLE:
+        return "❌ Voice recognition not available"
+    
+    try:
+        from voice_recognition import get_voice_engine
+        engine = await get_voice_engine()
+        
+        stats = engine.get_statistics()
+        voices = stats['voices']
+        
+        if search_name:
+            voices = [v for v in voices if search_name.lower() in v['name'].lower()]
+        
+        if not voices:
+            return f"❌ No voices found{' matching ' + search_name if search_name else ''}"
+        
+        result = f"🎙️ **Voice Profiles** ({len(voices)} found)\n\n"
+        
+        for i, voice in enumerate(voices, 1):
+            result += f"{i}. 🗣️ **{voice['name']}**\n"
+            result += f"   Recognitions: {voice['recognition_count']}\n"
+            if voice['last_recognized']:
+                result += f"   Last heard: {voice['last_recognized']}\n"
+            result += "\n"
+        
+        logging.info("[TASK COMPLETE] list_voice_profiles: Found %d voices", len(voices))
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] list_voice_profiles: %s", e)
+        return f"❌ Error listing voice profiles: {e}"
+
+
+@function_tool()
+async def multimodal_status(
+    context: RunContext  # type: ignore
+) -> str:
+    """Get status of the multi-modal (face + voice) identification system.
+    
+    Returns:
+        Comprehensive status of both facial and voice recognition systems
+    """
+    logging.info("[TASK START] multimodal_status")
+    
+    try:
+        from multimodal_recognition import get_multimodal_engine
+        
+        # Get engines
+        face_engine = await get_face_engine() if FACIAL_RECOGNITION_AVAILABLE else None
+        voice_engine = None
+        if VOICE_RECOGNITION_AVAILABLE:
+            from voice_recognition import get_voice_engine
+            voice_engine = await get_voice_engine()
+        
+        multimodal_engine = await get_multimodal_engine(face_engine, voice_engine)
+        stats = multimodal_engine.get_statistics()
+        
+        result = "🎭 **Multi-Modal Identification System Status**\n\n"
+        result += f"✅ Face Recognition: {'ACTIVE' if stats['face_engine_available'] else 'INACTIVE'}\n"
+        result += f"✅ Voice Recognition: {'ACTIVE' if stats['voice_engine_available'] else 'INACTIVE'}\n"
+        result += f"👥 Registered users: {stats['total_users']}\n\n"
+        
+        if stats['users']:
+            result += "**User Profiles:**\n"
+            for i, user in enumerate(stats['users'], 1):
+                result += f"{i}. 👤 **{user['name']}**\n"
+                result += f"   Face profile: {'✅' if user['has_face'] else '❌'}\n"
+                result += f"   Voice profile: {'✅' if user['has_voice'] else '❌'}\n"
+                result += f"   Face recognitions: {user['face_recognitions']}\n"
+                result += f"   Voice recognitions: {user['voice_recognitions']}\n"
+                result += f"   Total recognitions: {user['total_recognitions']}\n"
+                if user['last_seen']:
+                    result += f"   Last seen: {user['last_seen']}\n"
+                result += "\n"
+        else:
+            result += "💡 No users registered yet. Add users with link_user_profiles()\n"
+        
+        logging.info("[TASK COMPLETE] multimodal_status")
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] multimodal_status: %s", e)
+        return f"❌ Error getting multimodal status: {e}"
+
+
+@function_tool()
+async def link_user_profiles(
+    context: RunContext,  # type: ignore
+    name: str,
+    face_name: Optional[str] = None,
+    voice_name: Optional[str] = None
+) -> str:
+    """Link face and voice profiles to create a unified user profile.
+    
+    Args:
+        name: User's name for the unified profile
+        face_name: Name of the existing face profile to link
+        voice_name: Name of the existing voice profile to link
+        
+    Returns:
+        Confirmation of profile linking
+    """
+    logging.info("[TASK START] link_user_profiles: Linking profiles for '%s'", name)
+    
+    try:
+        from multimodal_recognition import get_multimodal_engine
+        
+        # Get engines
+        face_engine = await get_face_engine() if FACIAL_RECOGNITION_AVAILABLE else None
+        voice_engine = None
+        if VOICE_RECOGNITION_AVAILABLE:
+            from voice_recognition import get_voice_engine
+            voice_engine = await get_voice_engine()
+        
+        multimodal_engine = await get_multimodal_engine(face_engine, voice_engine)
+        db = multimodal_engine.multimodal_db
+        
+        # Get face and voice IDs
+        face_id = None
+        voice_id = None
+        
+        if face_name and face_engine:
+            face_data = face_engine.db.get_by_name(face_name)
+            if face_data:
+                face_id = face_data[0]
+        
+        if voice_name and voice_engine:
+            voice_data = voice_engine.db.get_voice(voice_name)
+            if voice_data:
+                voice_id = voice_data[0]
+        
+        # Create or update user profile
+        existing_user = db.get_user(name)
+        
+        if existing_user:
+            # Update existing user
+            if face_id:
+                db.link_face(name, face_id)
+            if voice_id:
+                db.link_voice(name, voice_id)
+            result = f"✅ Updated user profile: {name}\n\n"
+        else:
+            # Create new user
+            user_id = db.add_user(name, face_id, voice_id)
+            result = f"✅ Created new user profile: {name}\n"
+            result += f"🆔 User ID: {user_id[:8]}...\n\n"
+        
+        result += f"👤 Face profile: {'✅ Linked' if face_id else '❌ Not linked'}\n"
+        result += f"🎙️ Voice profile: {'✅ Linked' if voice_id else '❌ Not linked'}\n\n"
+        result += "💡 The system will now use both face and voice for identification when available."
+        
+        logging.info("[TASK COMPLETE] link_user_profiles: Profile created/updated for %s", name)
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] link_user_profiles: %s", e)
+        return f"❌ Error linking user profiles: {e}"
+
+
