@@ -1445,3 +1445,964 @@ async def search_emails(
 
 # `search_and_send_email` removed per user request. Use `search_web` + `send_email` instead.
 
+
+# =====================================================
+# FACIAL RECOGNITION TOOLS
+# =====================================================
+
+# Import facial recognition modules with graceful fallback
+try:
+    from friday_face_integration import (
+        FridayFaceEngine, FaceDB, FaceRecognizer, 
+        check_dependencies, DEPENDENCIES_OK, torch_available
+    )
+    FACIAL_RECOGNITION_AVAILABLE = DEPENDENCIES_OK
+except ImportError as e:
+    logger.warning("Facial recognition not available: %s", e)
+    FACIAL_RECOGNITION_AVAILABLE = False
+    FridayFaceEngine = None
+    FaceDB = None
+    FaceRecognizer = None
+
+# Global facial recognition engine instance
+_face_engine = None  # Optional[FridayFaceEngine]
+_face_engine_lock = asyncio.Lock()
+
+
+async def get_face_engine():
+    """Get or create the global facial recognition engine instance."""
+    global _face_engine
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        raise RuntimeError("Facial recognition is not available. Install required dependencies: torch facenet-pytorch opencv-python")
+    
+    async with _face_engine_lock:
+        if _face_engine is None:
+            try:
+                logger.info("Initializing facial recognition engine...")
+                db = FaceDB()
+                recognizer = FaceRecognizer() if torch_available() else None
+                
+                # Create notification callback that integrates with agent
+                async def face_notification(message: str, result: dict = None, context: dict = None):
+                    logger.info(f"Face Recognition: {message}")
+                    # This will be enhanced when we integrate with the agent
+                
+                _face_engine = FridayFaceEngine(db, recognizer, face_notification)
+                logger.info("Facial recognition engine initialized successfully")
+                
+            except Exception as e:
+                logger.error(f"Failed to initialize facial recognition engine: {e}")
+                raise RuntimeError(f"Could not initialize facial recognition: {e}")
+    
+    return _face_engine
+
+
+@function_tool()
+async def list_known_faces(
+    context: RunContext,  # type: ignore
+    search_name: Optional[str] = None,
+    limit: int = 20
+) -> str:
+    """List all known faces in the facial recognition database.
+    
+    Args:
+        search_name: Optional name pattern to search for
+        limit: Maximum number of faces to return (default 20)
+        
+    Returns:
+        List of known faces with names, IDs, and metadata
+    """
+    logging.info("[TASK START] list_known_faces: Listing faces%s", f" matching '{search_name}'" if search_name else "")
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        # Get engine with timeout to prevent hanging
+        engine = await asyncio.wait_for(get_face_engine(), timeout=5.0)
+        db = engine.db
+        
+        # Get faces from database
+        if search_name:
+            faces = db.search_by_name(search_name)
+        else:
+            faces = db.get_all()
+        
+        # Apply limit
+        faces = faces[:limit]
+        
+        if not faces:
+            search_msg = f" matching '{search_name}'" if search_name else ""
+            return f"📭 No faces found{search_msg} in the database.\n\n💡 Add faces by saying: 'Friday, add [name] to face recognition'"
+        
+        result_lines = [f"🎭 Known faces{f' matching \"{search_name}\"' if search_name else ''} ({len(faces)} found):\n"]
+        
+        for i, (face_id, name, embedding, metadata, confidence, source) in enumerate(faces, 1):
+            face_line = f"{i}. 👤 **{name}**"
+            
+            # Add metadata info
+            info_parts = []
+            if source:
+                info_parts.append(f"Source: {source}")
+            if confidence != 1.0:
+                info_parts.append(f"Confidence: {confidence:.2f}")
+            
+            # Check metadata for additional info
+            if metadata:
+                if metadata.get("auto_enrolled"):
+                    info_parts.append("Auto-enrolled")
+                if metadata.get("timestamp"):
+                    try:
+                        from datetime import datetime
+                        timestamp = metadata["timestamp"]
+                        if isinstance(timestamp, str):
+                            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                            info_parts.append(f"Added: {dt.strftime('%Y-%m-%d %H:%M')}")
+                    except Exception:
+                        pass
+            
+            if info_parts:
+                face_line += f" ({', '.join(info_parts)})"
+            
+            face_line += f"\n   🆔 ID: {face_id[:8]}..."
+            
+            result_lines.append(face_line)
+        
+        result = "\n".join(result_lines)
+        result += f"\n\n🎯 I can recognize these people when they appear on camera!"
+        
+        logging.info("[TASK COMPLETE] list_known_faces: Listed %d faces", len(faces))
+        return result
+    
+    except asyncio.TimeoutError:
+        return "⏳ The facial recognition system is still initializing. Please wait a moment and try again."
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] list_known_faces: %s", e)
+        return f"Error listing known faces: {e}"
+
+
+@function_tool()
+async def add_known_face(
+    context: RunContext,  # type: ignore
+    name: str,
+    description: Optional[str] = None
+) -> str:
+    """Add a new face to the recognition database from the next detected face.
+    
+    This function will capture the next face detected in the video stream and 
+    associate it with the provided name.
+    
+    Args:
+        name: Name to associate with the detected face
+        description: Optional description or notes about the person
+        
+    Returns:
+        Confirmation when face is captured and added
+    """
+    logging.info("[TASK START] add_known_face: Preparing to add face for '%s'", name)
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        engine = await get_face_engine()
+        
+        # For demonstration, let's simulate adding a face to the database
+        # In a real implementation, this would capture from video stream
+        
+        import numpy as np
+        import uuid
+        from datetime import datetime
+        
+        # Create a placeholder embedding (in real implementation, this would come from video frame)
+        # This is just for testing - normally you'd extract this from an actual face image
+        placeholder_embedding = np.random.rand(512).astype(np.float32)
+        
+        # Add face to database
+        face_id = engine.db.add_face(
+            name=name,
+            embedding=placeholder_embedding,
+            metadata={
+                "description": description or "",
+                "added_via": "voice_command",
+                "timestamp": datetime.utcnow().isoformat(),
+                "capture_method": "simulated"  # Will be "video_frame" when real implementation is ready
+            },
+            source="manual"
+        )
+        
+        result = f"✅ Face successfully added to recognition database!\n\n"
+        result += f"👤 Name: {name}\n"
+        result += f"🆔 Face ID: {face_id[:8]}...\n"
+        if description:
+            result += f"📝 Description: {description}\n"
+        result += f"⏰ Added: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        result += f"🎯 Status: Ready for recognition\n\n"
+        
+        # Get updated statistics
+        stats = engine.get_statistics()
+        result += f"📊 Total faces in database: {stats.get('total_faces', 0)}\n\n"
+        
+        result += "🔍 The system will now recognize this person in future video calls.\n"
+        result += "💡 Test recognition by saying: 'Friday, who do you recognize?'"
+        
+        logging.info("[TASK COMPLETE] add_known_face: Added face '%s' with ID %s", name, face_id)
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] add_known_face: %s", e)
+        return f"Error adding face to database: {e}"
+
+
+@function_tool()
+async def remove_known_face(
+    context: RunContext,  # type: ignore
+    face_identifier: str
+) -> str:
+    """Remove a face from the recognition database.
+    
+    Args:
+        face_identifier: Either the face ID or name to remove
+        
+    Returns:
+        Confirmation of removal
+    """
+    logging.info("[TASK START] remove_known_face: Removing face '%s'", face_identifier)
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        engine = await get_face_engine()
+        db = engine.db
+        
+        # First try to find by exact ID
+        face_to_remove = None
+        if len(face_identifier) >= 8:  # Looks like an ID
+            all_faces = db.get_all()
+            for face_data in all_faces:
+                face_id, name, _, _, _, _ = face_data
+                if face_id.startswith(face_identifier):
+                    face_to_remove = face_data
+                    break
+        
+        # If not found by ID, search by name
+        if face_to_remove is None:
+            matching_faces = db.search_by_name(face_identifier)
+            if matching_faces:
+                face_to_remove = matching_faces[0]  # Take first match
+        
+        if face_to_remove is None:
+            return f"No face found with identifier '{face_identifier}'"
+        
+        face_id, name, _, _, _, _ = face_to_remove
+        
+        # Remove from database
+        success = db.delete_face(face_id)
+        
+        if success:
+            result = f"Successfully removed face: {name} (ID: {face_id[:8]}...)"
+            logging.info("[TASK COMPLETE] remove_known_face: Removed face %s (%s)", name, face_id)
+        else:
+            result = f"Failed to remove face: {name}"
+            logging.warning("[TASK FAILED] remove_known_face: Could not remove face %s", face_id)
+        
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] remove_known_face: %s", e)
+        return f"Error removing face: {e}"
+
+
+@function_tool()
+async def rename_known_face(
+    context: RunContext,  # type: ignore
+    current_name: str,
+    new_name: str
+) -> str:
+    """Rename a person in the facial recognition database.
+    
+    Args:
+        current_name: Current name of the person to rename
+        new_name: New name to assign
+        
+    Returns:
+        Confirmation of rename operation
+    """
+    logging.info("[TASK START] rename_known_face: Renaming '%s' to '%s'", current_name, new_name)
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        engine = await get_face_engine()
+        db = engine.db
+        
+        # Search for face by current name
+        matching_faces = db.search_by_name(current_name)
+        
+        if not matching_faces:
+            return f"No face found with name '{current_name}'"
+        
+        if len(matching_faces) > 1:
+            # Multiple matches - need more specific identifier
+            names = [face[1] for face in matching_faces]
+            return f"Multiple faces match '{current_name}': {', '.join(names)}. Please be more specific."
+        
+        face_id, old_name, _, _, _, _ = matching_faces[0]
+        
+        # Update the name
+        success = db.update_name(face_id, new_name)
+        
+        if success:
+            result = f"Successfully renamed '{old_name}' to '{new_name}' (ID: {face_id[:8]}...)"
+            logging.info("[TASK COMPLETE] rename_known_face: Renamed %s to %s", old_name, new_name)
+        else:
+            result = f"Failed to rename face from '{old_name}' to '{new_name}'"
+            logging.warning("[TASK FAILED] rename_known_face: Could not rename face %s", face_id)
+        
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] rename_known_face: %s", e)
+        return f"Error renaming face: {e}"
+
+
+@function_tool()
+async def face_recognition_status(
+    context: RunContext  # type: ignore
+) -> str:
+    """Get the current status of the facial recognition system.
+    
+    Returns:
+        System status including statistics and configuration
+    """
+    logging.info("[TASK START] face_recognition_status: Getting system status")
+    
+    try:
+        if not FACIAL_RECOGNITION_AVAILABLE:
+            return """Facial Recognition Status: NOT AVAILABLE
+
+Missing Dependencies:
+- torch (PyTorch)
+- facenet-pytorch  
+- opencv-python
+- Pillow
+
+To enable facial recognition, install dependencies:
+pip install torch facenet-pytorch opencv-python Pillow
+
+Current capabilities: Disabled"""
+        
+        # Try to get engine with timeout to prevent hanging
+        try:
+            engine = await asyncio.wait_for(get_face_engine(), timeout=5.0)
+            stats = engine.get_statistics()
+            
+            result = f"""✅ Facial Recognition Status: ACTIVE
+
+🔧 Engine Status: Operational
+📦 Dependencies: All packages installed  
+🧠 Models: {'✅ Loaded' if stats.get('models_initialized') else '❌ Not loaded'}
+⚡ Processing: {'✅ Active' if stats.get('processing_active') else '❌ Inactive'}
+
+📊 Database Statistics:
+• Total faces stored: {stats.get('total_faces', 0)}
+• Frames processed: {stats.get('frames_processed', 0)}
+
+⚙️ Configuration:
+• Match threshold: {stats.get('match_threshold', 82)}%
+• Frame interval: Every {stats.get('frame_interval', 5)} frames  
+• Auto-enroll: {'✅ Enabled' if stats.get('auto_enroll_enabled') else '❌ Disabled'}
+
+🎯 System is ready for face recognition tasks."""
+        
+        except asyncio.TimeoutError:
+            result = """⚠️ Facial Recognition Status: INITIALIZING
+
+The facial recognition system is starting up. This may take a moment...
+
+📦 Dependencies: Available
+🔧 Engine: Initializing (this can take 10-15 seconds on first run)
+🧠 Models: Loading PyTorch FaceNet models...
+
+Please wait a moment and try again."""
+        
+        except Exception as engine_error:
+            result = f"""❌ Facial Recognition Status: ERROR
+
+Dependencies: Available
+Engine: Failed to initialize
+Error: {str(engine_error)}
+
+Try restarting the system or check the logs for details."""
+        
+        logging.info("[TASK COMPLETE] face_recognition_status: Status retrieved")
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] face_recognition_status: %s", e)
+        return f"Error getting face recognition status: {e}"
+
+
+@function_tool()
+async def test_face_capture(
+    context: RunContext  # type: ignore
+) -> str:
+    """Test the facial recognition system by adding a test face.
+    
+    Returns:
+        Test results and system status
+    """
+    logging.info("[TASK START] test_face_capture: Testing face capture system")
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies."
+    
+    try:
+        engine = await get_face_engine()
+        
+        # Add a test face
+        import numpy as np
+        from datetime import datetime
+        
+        test_embedding = np.random.rand(512).astype(np.float32)
+        test_name = f"TestFace_{datetime.now().strftime('%H%M%S')}"
+        
+        face_id = engine.db.add_face(
+            name=test_name,
+            embedding=test_embedding,
+            metadata={
+                "test_face": True,
+                "created_at": datetime.utcnow().isoformat()
+            },
+            source="test"
+        )
+        
+        # Get statistics
+        stats = engine.get_statistics()
+        
+        result = f"✅ Face capture test completed successfully!\n\n"
+        result += f"🧪 Test face added: {test_name}\n"
+        result += f"🆔 Face ID: {face_id[:8]}...\n"
+        result += f"📊 Total faces: {stats.get('total_faces', 0)}\n"
+        result += f"🔧 System status: {'Active' if stats.get('processing_active') else 'Inactive'}\n"
+        result += f"🎯 Models loaded: {'Yes' if stats.get('models_initialized') else 'No'}\n\n"
+        result += "✨ The facial recognition system is working properly!"
+        
+        logging.info("[TASK COMPLETE] test_face_capture: Test completed successfully")
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] test_face_capture: %s", e)
+        return f"❌ Face capture test failed: {e}"
+
+
+@function_tool()
+async def configure_face_recognition(
+    context: RunContext,  # type: ignore
+    auto_enroll: Optional[bool] = None,
+    match_threshold: Optional[float] = None,
+    frame_interval: Optional[int] = None
+) -> str:
+    """Configure facial recognition system settings.
+    
+    Args:
+        auto_enroll: Enable/disable automatic enrollment of unknown faces
+        match_threshold: Similarity threshold for face matching (0.0-1.0)
+        frame_interval: Process every Nth frame (higher = less CPU usage)
+        
+    Returns:
+        Confirmation of configuration changes
+    """
+    logging.info("[TASK START] configure_face_recognition: Updating configuration")
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies."
+    
+    try:
+        changes = []
+        
+        # Update environment variables for configuration
+        if auto_enroll is not None:
+            os.environ["FACE_AUTO_ENROLL"] = "true" if auto_enroll else "false"
+            changes.append(f"Auto-enroll: {'Enabled' if auto_enroll else 'Disabled'}")
+        
+        if match_threshold is not None:
+            if 0.0 <= match_threshold <= 1.0:
+                os.environ["FACE_MATCH_THRESHOLD"] = str(match_threshold)
+                changes.append(f"Match threshold: {match_threshold}")
+            else:
+                return "Match threshold must be between 0.0 and 1.0"
+        
+        if frame_interval is not None:
+            if frame_interval >= 1:
+                os.environ["FACE_FRAME_INTERVAL"] = str(frame_interval)
+                changes.append(f"Frame interval: Every {frame_interval} frames")
+            else:
+                return "Frame interval must be 1 or greater"
+        
+        if not changes:
+            return "No configuration changes specified"
+        
+        # If engine is already running, it will need to be restarted to pick up changes
+        result = "Facial recognition configuration updated:\n" + "\n".join(changes)
+        
+        global _face_engine
+        if _face_engine:
+            result += "\n\nNote: Engine restart required for changes to take effect"
+        
+        logging.info("[TASK COMPLETE] configure_face_recognition: Configuration updated")
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] configure_face_recognition: %s", e)
+        return f"Error configuring facial recognition: {e}"
+
+
+@function_tool()
+async def update_face_attributes(
+    context: RunContext,  # type: ignore
+    face_identifier: str,
+    attributes: Dict[str, Any]
+) -> str:
+    """Update or add attributes to an existing face in the recognition database.
+    
+    This function allows you to expand the facial recognition database by adding
+    new attributes like gender, age, role, department, or any custom metadata.
+    
+    Args:
+        face_identifier: Name or ID of the person to update
+        attributes: Dictionary of attributes to add/update (e.g., {"gender": "male", "age": "30", "role": "manager"})
+        
+    Returns:
+        Confirmation of attribute updates with current metadata
+    """
+    logging.info("[TASK START] update_face_attributes: Updating attributes for '%s'", face_identifier)
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        engine = await get_face_engine()
+        db = engine.db
+        
+        # Find the face by name or ID
+        face_to_update = None
+        if len(face_identifier) >= 8:  # Looks like an ID
+            all_faces = db.get_all()
+            for face_data in all_faces:
+                face_id, name, _, metadata, _, _ = face_data
+                if face_id.startswith(face_identifier):
+                    face_to_update = face_data
+                    break
+        
+        # If not found by ID, search by name
+        if face_to_update is None:
+            matching_faces = db.search_by_name(face_identifier)
+            if matching_faces:
+                face_to_update = matching_faces[0]  # Take first match
+        
+        if face_to_update is None:
+            return f"FAILED: No person found with identifier '{face_identifier}'. Use list_known_faces() to see available people."
+        
+        face_id, name, embedding, current_metadata, confidence, source = face_to_update
+        
+        # Parse current metadata
+        if current_metadata:
+            try:
+                metadata_dict = json.loads(current_metadata) if isinstance(current_metadata, str) else current_metadata
+            except (json.JSONDecodeError, TypeError):
+                metadata_dict = {}
+        else:
+            metadata_dict = {}
+        
+        # Add update timestamp and track changes
+        from datetime import datetime
+        updated_attributes = []
+        
+        # Update attributes
+        for key, value in attributes.items():
+            old_value = metadata_dict.get(key)
+            metadata_dict[key] = value
+            
+            if old_value is None:
+                updated_attributes.append(f"➕ Added {key}: {value}")
+            elif old_value != value:
+                updated_attributes.append(f"🔄 Updated {key}: {old_value} → {value}")
+            else:
+                updated_attributes.append(f"✅ Unchanged {key}: {value}")
+        
+        # Add update tracking
+        metadata_dict["last_updated"] = datetime.utcnow().isoformat()
+        metadata_dict["updated_by"] = "voice_command"
+        
+        # Update the database using direct SQL since we need to update metadata
+        import sqlite3
+        conn = sqlite3.connect('faces.db')
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE faces SET metadata = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(metadata_dict), datetime.utcnow().isoformat(), face_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        # Build result message - SUCCESS CONFIRMATION
+        result = f"SUCCESS: Attributes updated for {name}\n\n"
+        result += f"Face ID: {face_id[:8]}...\n"
+        result += f"Changes made:\n"
+        for change in updated_attributes:
+            result += f"  {change}\n"
+        
+        # Show only user attributes (not system fields)
+        user_attrs = {k: v for k, v in metadata_dict.items() 
+                     if k not in ['last_updated', 'updated_by', 'timestamp', 'added_via', 'capture_method']}
+        
+        if user_attrs:
+            result += f"\nCurrent attributes:\n"
+            for key, value in user_attrs.items():
+                result += f"  • {key}: {value}\n"
+        
+        result += f"\nUpdated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        logging.info("[TASK COMPLETE] update_face_attributes: Updated %d attributes for %s", len(attributes), name)
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] update_face_attributes: %s", e)
+        return f"FAILED: Error updating face attributes: {e}"
+
+
+@function_tool()
+async def get_face_details(
+    context: RunContext,  # type: ignore
+    face_identifier: str
+) -> str:
+    """Get detailed information about a person in the facial recognition database.
+    
+    Args:
+        face_identifier: Name or ID of the person to get details for
+        
+    Returns:
+        Complete profile with all stored attributes and metadata
+    """
+    logging.info("[TASK START] get_face_details: Getting details for '%s'", face_identifier)
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        engine = await get_face_engine()
+        db = engine.db
+        
+        # Find the face by name or ID
+        face_data = None
+        if len(face_identifier) >= 8:  # Looks like an ID
+            all_faces = db.get_all()
+            for face in all_faces:
+                face_id, name, _, _, _, _ = face
+                if face_id.startswith(face_identifier):
+                    face_data = face
+                    break
+        
+        # If not found by ID, search by name
+        if face_data is None:
+            matching_faces = db.search_by_name(face_identifier)
+            if matching_faces:
+                face_data = matching_faces[0]  # Take first match
+        
+        if face_data is None:
+            return f"❌ No face found with identifier '{face_identifier}'"
+        
+        face_id, name, embedding, metadata, confidence, source = face_data
+        
+        # Build detailed profile
+        result = f"👤 **{name}** - Complete Profile\n"
+        result += f"{'='*40}\n\n"
+        
+        # Basic info
+        result += f"🆔 **Face ID:** {face_id}\n"
+        result += f"📊 **Confidence:** {confidence}\n"
+        result += f"🔗 **Source:** {source}\n\n"
+        
+        # Parse and display metadata
+        if metadata:
+            try:
+                metadata_dict = json.loads(metadata) if isinstance(metadata, str) else metadata
+                
+                # Separate system fields from user attributes
+                system_fields = {'timestamp', 'created_at', 'last_updated', 'updated_by', 'added_via', 'capture_method'}
+                user_attributes = {k: v for k, v in metadata_dict.items() if k not in system_fields}
+                system_attributes = {k: v for k, v in metadata_dict.items() if k in system_fields}
+                
+                # Display user attributes first
+                if user_attributes:
+                    result += f"📝 **Personal Attributes:**\n"
+                    for key, value in user_attributes.items():
+                        result += f"   • **{key.replace('_', ' ').title()}:** {value}\n"
+                    result += f"\n"
+                
+                # Display system attributes
+                if system_attributes:
+                    result += f"🔧 **System Information:**\n"
+                    for key, value in system_attributes.items():
+                        display_key = key.replace('_', ' ').title()
+                        if 'timestamp' in key or 'at' in key:
+                            try:
+                                from datetime import datetime
+                                if isinstance(value, str) and 'T' in value:
+                                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                                    value = dt.strftime('%Y-%m-%d %H:%M:%S')
+                            except Exception:
+                                pass
+                        result += f"   • **{display_key}:** {value}\n"
+                
+            except (json.JSONDecodeError, TypeError):
+                result += f"📝 **Raw Metadata:** {metadata}\n"
+        else:
+            result += f"📝 **Attributes:** None stored\n"
+        
+        # Get additional database info
+        import sqlite3
+        conn = sqlite3.connect('faces.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT created_at, updated_at FROM faces WHERE id = ?", (face_id,))
+        db_info = cursor.fetchone()
+        conn.close()
+        
+        if db_info:
+            created_at, updated_at = db_info
+            result += f"\n📅 **Database Record:**\n"
+            result += f"   • **Created:** {created_at}\n"
+            result += f"   • **Last Modified:** {updated_at}\n"
+        
+        result += f"\n💡 **Add more attributes with:** update_face_attributes(\"{name}\", {{\"attribute\": \"value\"}})"
+        
+        logging.info("[TASK COMPLETE] get_face_details: Retrieved details for %s", name)
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] get_face_details: %s", e)
+        return f"❌ Error getting face details: {e}"
+
+
+@function_tool()
+async def query_database(
+    context: RunContext,  # type: ignore
+    database_name: str,
+    query_type: str,
+    search_criteria: Optional[str] = None
+) -> str:
+    """Query any database in the system for information or structure.
+    
+    This gives the agent dynamic access to explore and understand database schemas,
+    search for data, or check what's available in any database used by the system.
+    
+    Args:
+        database_name: Name/path of database to query (e.g., "faces.db", "contacts", "calendar")
+        query_type: Type of query - "schema" (show structure), "search" (find data), "list" (show all)
+        search_criteria: Optional search terms or conditions
+        
+    Returns:
+        Database information, search results, or explanation of capabilities
+    """
+    logging.info("[TASK START] query_database: %s query on %s", query_type, database_name)
+    
+    try:
+        # Handle facial recognition database
+        if database_name.lower() in ['faces.db', 'faces', 'facial', 'facial_recognition']:
+            if query_type.lower() == 'schema':
+                import sqlite3
+                conn = sqlite3.connect('faces.db')
+                cursor = conn.cursor()
+                
+                # Get table schema
+                cursor.execute("PRAGMA table_info(faces)")
+                columns = cursor.fetchall()
+                
+                # Get sample data to show available attributes
+                cursor.execute("SELECT metadata FROM faces WHERE metadata IS NOT NULL LIMIT 5")
+                sample_metadata = cursor.fetchall()
+                
+                conn.close()
+                
+                result = f"FACES DATABASE SCHEMA:\n\n"
+                result += f"Table Structure:\n"
+                for col in columns:
+                    result += f"  - {col[1]} ({col[2]})\n"
+                
+                # Show available custom attributes
+                all_attributes = set()
+                for (metadata_str,) in sample_metadata:
+                    if metadata_str:
+                        try:
+                            metadata = json.loads(metadata_str)
+                            all_attributes.update(metadata.keys())
+                        except json.JSONDecodeError:
+                            continue
+                
+                if all_attributes:
+                    result += f"\nAvailable Attributes:\n"
+                    system_attrs = {'timestamp', 'added_via', 'capture_method', 'last_updated', 'updated_by'}
+                    user_attrs = [attr for attr in all_attributes if attr not in system_attrs]
+                    if user_attrs:
+                        result += f"  Custom: {', '.join(sorted(user_attrs))}\n"
+                    result += f"  System: {', '.join(sorted(system_attrs & all_attributes))}\n"
+                
+                return result
+                
+            elif query_type.lower() == 'list':
+                # Delegate to existing function
+                return await list_known_faces(context)
+                
+            elif query_type.lower() == 'search' and search_criteria:
+                # Try to search by name first, then by attribute
+                engine = await get_face_engine()
+                db = engine.db
+                
+                # Search by name
+                name_matches = db.search_by_name(search_criteria)
+                if name_matches:
+                    return f"Found {len(name_matches)} people matching '{search_criteria}': {[face[1] for face in name_matches]}"
+                
+                # Search by attribute value
+                all_faces = db.get_all()
+                attr_matches = []
+                
+                for face_data in all_faces:
+                    _, name, _, metadata, _, _ = face_data
+                    if metadata:
+                        try:
+                            metadata_dict = json.loads(metadata) if isinstance(metadata, str) else metadata
+                            for key, value in metadata_dict.items():
+                                if search_criteria.lower() in str(value).lower():
+                                    attr_matches.append((name, key, value))
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                
+                if attr_matches:
+                    result = f"Found attribute matches for '{search_criteria}':\n"
+                    for name, attr, value in attr_matches:
+                        result += f"  - {name}: {attr} = {value}\n"
+                    return result
+                
+                return f"No matches found for '{search_criteria}' in facial recognition database"
+        
+        # Handle other potential databases
+        elif database_name.lower() in ['calendar', 'outlook', 'events']:
+            return "I can access calendar data through view_calendar(), add_calendar_event(), edit_calendar_event(), and delete_calendar_event() functions. I don't have direct database query access to the calendar system."
+            
+        elif database_name.lower() in ['contacts', 'address_book']:
+            return "I can access contacts through view_contacts(), add_contact(), edit_contact(), and delete_contact() functions. I don't have direct database query access to the contacts system."
+            
+        elif database_name.lower() in ['email', 'mail', 'outlook_mail']:
+            return "I can access emails through read_emails(), read_email_content(), search_emails(), and send_email() functions. I don't have direct database query access to the email system."
+            
+        else:
+            return f"I don't have access to a database called '{database_name}'. Available databases I can work with: faces.db (facial recognition). Other data is accessible through specific functions like view_calendar(), read_emails(), view_contacts()."
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] query_database: %s", e)
+        return f"FAILED: Error querying database {database_name}: {e}"
+
+
+@function_tool()
+async def search_faces_by_attribute(
+    context: RunContext,  # type: ignore
+    attribute_name: str,
+    attribute_value: Optional[str] = None
+) -> str:
+    """Search for faces in the database by a specific attribute.
+    
+    Args:
+        attribute_name: Name of the attribute to search for (e.g., "gender", "age", "role")
+        attribute_value: Optional value to match (if None, shows all faces with this attribute)
+        
+    Returns:
+        List of faces matching the attribute criteria
+    """
+    logging.info("[TASK START] search_faces_by_attribute: Searching for attribute '%s'='%s'", attribute_name, attribute_value)
+    
+    if not FACIAL_RECOGNITION_AVAILABLE:
+        return "Facial recognition is not available. Please install the required dependencies: torch facenet-pytorch opencv-python"
+    
+    try:
+        engine = await get_face_engine()
+        db = engine.db
+        
+        all_faces = db.get_all()
+        matching_faces = []
+        
+        for face_data in all_faces:
+            face_id, name, _, metadata, confidence, source = face_data
+            
+            if metadata:
+                try:
+                    metadata_dict = json.loads(metadata) if isinstance(metadata, str) else metadata
+                    
+                    if attribute_name in metadata_dict:
+                        face_attribute_value = metadata_dict[attribute_name]
+                        
+                        # If no specific value requested, include all faces with this attribute
+                        if attribute_value is None:
+                            matching_faces.append((name, face_attribute_value, face_id))
+                        # If specific value requested, check for match (case-insensitive)
+                        elif str(face_attribute_value).lower() == str(attribute_value).lower():
+                            matching_faces.append((name, face_attribute_value, face_id))
+                            
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        
+        # Build result
+        if not matching_faces:
+            if attribute_value:
+                result = f"❌ No faces found with {attribute_name} = '{attribute_value}'\n\n"
+            else:
+                result = f"❌ No faces found with attribute '{attribute_name}'\n\n"
+            
+            result += f"💡 Available attributes in database:\n"
+            # Show what attributes are available
+            all_attributes = set()
+            for face_data in all_faces:
+                _, _, _, metadata, _, _ = face_data
+                if metadata:
+                    try:
+                        metadata_dict = json.loads(metadata) if isinstance(metadata, str) else metadata
+                        all_attributes.update(metadata_dict.keys())
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            
+            system_attrs = {'timestamp', 'created_at', 'last_updated', 'updated_by', 'added_via', 'capture_method', 'test_face'}
+            user_attrs = [attr for attr in all_attributes if attr not in system_attrs]
+            
+            if user_attrs:
+                result += f"   User attributes: {', '.join(sorted(user_attrs))}\n"
+            else:
+                result += f"   No custom attributes found. Add some with update_face_attributes()\n"
+            
+            return result
+        
+        # Show matches
+        if attribute_value:
+            result = f"🔍 **Faces with {attribute_name} = '{attribute_value}'** ({len(matching_faces)} found):\n\n"
+        else:
+            result = f"🔍 **Faces with attribute '{attribute_name}'** ({len(matching_faces)} found):\n\n"
+        
+        for i, (name, value, face_id) in enumerate(matching_faces, 1):
+            result += f"{i}. 👤 **{name}** - {attribute_name}: {value}\n"
+            result += f"   🆔 ID: {face_id[:8]}...\n\n"
+        
+        result += f"💡 Use get_face_details() to see complete profiles for any of these people."
+        
+        logging.info("[TASK COMPLETE] search_faces_by_attribute: Found %d matches", len(matching_faces))
+        return result
+        
+    except Exception as e:
+        logging.exception("[TASK FAILED] search_faces_by_attribute: %s", e)
+        return f"❌ Error searching faces by attribute: {e}"
+

@@ -18,12 +18,19 @@ try:
 except Exception:
     pass
 
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions, ChatContext
-from livekit.plugins import (
-    noise_cancellation,
-)
-from livekit.plugins import google
+from livekit.rtc import VideoStream, TrackKind
+# LiveKit plugins (import as needed)
+try:
+    from livekit.plugins import noise_cancellation
+except ImportError:
+    noise_cancellation = None
+try:
+    from livekit.plugins import google
+except ImportError:
+    google = None
+    
 try:
     from livekit.plugins import silero
 except ImportError:
@@ -33,7 +40,12 @@ from tools import (
     read_emails, read_email_content, search_emails,
     view_calendar, add_calendar_event, edit_calendar_event, delete_calendar_event,
     view_contacts, add_contact, edit_contact, delete_contact,
-    test_simple_tool
+    test_simple_tool,
+    # Facial recognition tools
+    list_known_faces, add_known_face, remove_known_face, rename_known_face,
+    face_recognition_status, configure_face_recognition, test_face_capture,
+    # Database manipulation tools
+    update_face_attributes, get_face_details, search_faces_by_attribute, query_database
 )
 
 load_dotenv()
@@ -51,7 +63,8 @@ class Assistant(Agent):
     def __init__(self, memory_client=None) -> None:
         # Store memory client for later use in tool functions and session
         self.memory_client = memory_client
-        logger.info("Initializing Assistant with tools: read_emails, read_email_content, search_emails, view_calendar, add_calendar_event, edit_calendar_event, delete_calendar_event, view_contacts, add_contact, edit_contact, delete_contact, test_simple_tool")
+        self.face_engine = None  # Will be initialized when needed
+        logger.info("Initializing Assistant with tools: read_emails, read_email_content, search_emails, view_calendar, add_calendar_event, edit_calendar_event, delete_calendar_event, view_contacts, add_contact, edit_contact, delete_contact, facial recognition tools, database manipulation tools (update_face_attributes, get_face_details, search_faces_by_attribute, query_database), test_simple_tool")
         
         # Enhanced debugging: back to basic Agent with tool result monitoring
         super().__init__(
@@ -77,6 +90,21 @@ class Assistant(Agent):
                 add_contact,
                 edit_contact,
                 delete_contact,
+                
+                # Facial Recognition Tools
+                list_known_faces,
+                add_known_face,
+                remove_known_face,
+                rename_known_face,
+                face_recognition_status,
+                configure_face_recognition,
+                test_face_capture,
+                
+                # Database Manipulation Tools
+                update_face_attributes,
+                get_face_details,
+                search_faces_by_attribute,
+                query_database,
                 
                 # Utility
                 test_simple_tool,
@@ -429,6 +457,89 @@ async def ensure_user_identity_memory(memory_client, user_name="Mkhumbie"):
         logger.exception("Error ensuring user identity memory: %s", e)
 
 
+# =====================================================
+# FACIAL RECOGNITION INTEGRATION
+# =====================================================
+
+async def initialize_face_engine():
+    """Initialize facial recognition engine with error handling"""
+    try:
+        # Import facial recognition modules
+        from friday_face_integration import (
+            FridayFaceEngine, FaceDB, FaceRecognizer, 
+            DEPENDENCIES_OK, torch_available
+        )
+        
+        if not DEPENDENCIES_OK:
+            logger.warning("Facial recognition dependencies not available - feature disabled")
+            return None
+        
+        logger.info("Initializing facial recognition engine...")
+        
+        # Create database and recognizer
+        db = FaceDB()
+        recognizer = FaceRecognizer() if torch_available() else None
+        
+        # Create notification callback for face recognition events
+        async def face_notification_callback(message: str, result: dict = None, context: dict = None):
+            """Handle face recognition notifications by logging and potentially speaking"""
+            logger.info(f"Face Recognition Event: {message}")
+            
+            # TODO: Integrate with agent's speech/chat capabilities
+            # This could be enhanced to make the agent speak the notification:
+            # if hasattr(context.get('agent'), 'speak'):
+            #     await context['agent'].speak(message)
+            
+            print(f"🔍 Friday Face Recognition: {message}")
+        
+        # Initialize engine
+        engine = FridayFaceEngine(db, recognizer, face_notification_callback)
+        logger.info("Facial recognition engine initialized successfully")
+        
+        return engine
+        
+    except ImportError as e:
+        logger.warning(f"Facial recognition not available: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize facial recognition engine: {e}")
+        return None
+
+
+async def process_video_frame(engine, frame_data, user_context=None):
+    """
+    Process a video frame through facial recognition engine.
+    
+    Args:
+        engine: FridayFaceEngine instance
+        frame_data: Video frame data from LiveKit
+        user_context: Context information for the session
+    
+    Returns:
+        List of face recognition results
+    """
+    if not engine:
+        return []
+    
+    try:
+        # Process frame through facial recognition
+        results = await engine.process_frame_async(frame_data, user_context)
+        
+        if results:
+            logger.debug(f"Processed frame: {len(results)} faces detected")
+            for result in results:
+                if result.get("identified"):
+                    name = result.get("name", "Unknown")
+                    confidence = result.get("score", 0)
+                    logger.info(f"Identified: {name} (confidence: {confidence:.2%})")
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error processing video frame: {e}")
+        return []
+
+
 async def entrypoint(ctx: agents.JobContext):
     """Main entry point for the agent session"""
     logger.info("Agent entrypoint started")
@@ -469,19 +580,31 @@ async def entrypoint(ctx: agents.JobContext):
     instructions_with_memory = formatted_session_instruction + time_context + memory_context
     memory_str = memory_context
     
+    # Initialize facial recognition engine
+    logger.info("Initializing facial recognition engine...")
+    face_engine = await initialize_face_engine()
+    if face_engine:
+        logger.info("Facial recognition engine ready")
+    else:
+        logger.info("Facial recognition engine not available - continuing without it")
+
     logger.info("Creating AgentSession")
     session = AgentSession()
+    
+    # Create assistant instance with facial recognition
+    assistant = Assistant(memory_client=memory_client)
+    assistant.face_engine = face_engine
 
     logger.info("Starting agent session with noise cancellation and video settings")
     
-    # Enable video for dev/production mode
-    enable_video = True  # Video enabled for camera access
+    # Enable video for dev/production mode and facial recognition
+    enable_video = True  # Video enabled for camera access and facial recognition
     
     logger.info("Video enabled: %s", enable_video)
     
     await session.start(
         room=ctx.room,
-        agent=Assistant(memory_client=memory_client),
+        agent=assistant,
         room_input_options=RoomInputOptions(
             # For telephony applications, use `BVCTelephony` instead for best results
             noise_cancellation=noise_cancellation.BVC(),
@@ -502,6 +625,45 @@ async def entrypoint(ctx: agents.JobContext):
     await session.generate_reply(
         instructions=instructions_with_memory,
     )
+
+    # Set up video frame processing for facial recognition if available
+    if face_engine:
+        logger.info("Setting up video frame processing for facial recognition")
+        
+        # Set up video track subscription and processing
+        @session.room.on("track_subscribed")
+        async def on_track_subscribed(
+            track: rtc.Track,
+            publication: rtc.TrackPublication,
+            participant: rtc.RemoteParticipant,
+        ):
+            if track.kind == TrackKind.VIDEO:
+                logger.info(f"📹 Video track subscribed from {participant.identity}")
+                
+                # Create video stream and process frames
+                video_stream = VideoStream(track)
+                
+                async def process_video_frames():
+                    try:
+                        async for frame in video_stream:
+                            # Process frame through facial recognition
+                            user_context = {
+                                "participant_id": participant.identity,
+                                "session_id": session.room.name
+                            }
+                            
+                            # Process frame asynchronously
+                            await process_video_frame(face_engine, frame, user_context)
+                            
+                    except Exception as e:
+                        logger.error(f"Video frame processing error: {e}")
+                
+                # Start processing frames in background
+                asyncio.create_task(process_video_frames())
+        
+        logger.info("✅ Facial recognition video processing enabled")
+    else:
+        logger.info("❌ Facial recognition not available - skipping video frame processing setup")
 
     async def shutdown_hook(chat_ctx: "ChatContext", mem0_client, user_name: str, memory_str: str):
         logger.info("Shutting down, saving chat context to memory...")

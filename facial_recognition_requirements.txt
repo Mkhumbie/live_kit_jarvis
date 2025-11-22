@@ -1,0 +1,14 @@
+# Facial Recognition Requirements
+# Add these to requirements.txt for facial recognition integration
+
+# Core computer vision libraries
+opencv-python>=4.8.0
+face-recognition>=1.3.0
+Pillow>=10.0.0
+
+# For enhanced face detection and recognition
+dlib>=19.24.0  # Optional: better face detection
+mediapipe>=0.10.0  # Optional: Google's face detection
+
+# For storing and managing face embeddings
+numpy>=1.24.0
